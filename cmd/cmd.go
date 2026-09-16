@@ -16,15 +16,18 @@ limitations under the License.
 package cmd
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	"os/exec"
 	"unicode"
 
 	"github.com/ghodss/yaml"
 	"github.com/spf13/cobra"
+	"github.com/tidwall/sjson"
+	k8syaml "k8s.io/apimachinery/pkg/util/yaml"
 )
 
 var outputFormat *string
@@ -48,7 +51,8 @@ func Execute() {
 }
 
 var rootCmd = &cobra.Command{
-	Use: "kubectl-neat",
+	Use:          "kubectl-neat",
+	SilenceUsage: true, // usage is for flag mistakes, not for bad input
 	Example: `kubectl get pod mypod -o yaml | kubectl neat
 kubectl get pod mypod -oyaml | kubectl neat -o json
 kubectl neat -f - <./my-pod.json
@@ -59,9 +63,12 @@ kubectl neat -f ./my-pod.json --output yaml`,
 		var err error
 		if *inputFile == "-" {
 			stdin := cmd.InOrStdin()
-			in, err = ioutil.ReadAll(stdin)
+			in, err = io.ReadAll(stdin)
+			if err != nil {
+				return err
+			}
 		} else {
-			in, err = ioutil.ReadFile(*inputFile)
+			in, err = os.ReadFile(*inputFile)
 			if err != nil {
 				return err
 			}
@@ -145,32 +152,89 @@ func isJSON(s []byte) bool {
 	return bytes.HasPrefix(bytes.TrimLeftFunc(s, unicode.IsSpace), []byte{'{'})
 }
 
-// NeatYAMLOrJSON converts 'in' to json if needed, invokes neat, and converts back if needed according the the outputFormat argument: yaml/json/same
+// NeatYAMLOrJSON converts 'in' to json if needed, invokes neat, and converts back if needed according the the outputFormat argument: yaml/json/same.
+// YAML input may hold several documents separated by '---' (#109). They are neated one by one and
+// written back as a YAML stream, or, when JSON output is requested, as the items of a v1 List.
 func NeatYAMLOrJSON(in []byte, outputFormat string) (out []byte, err error) {
-	var injson, outjson string
-	itsYaml := !isJSON(in)
-	if itsYaml {
-		injsonbytes, err := yaml.YAMLToJSON(in)
+	if isJSON(in) {
+		outjson, err := Neat(string(in))
 		if err != nil {
-			return nil, fmt.Errorf("error converting from yaml to json : %v", err)
+			return nil, fmt.Errorf("error neating : %v", err)
 		}
-		injson = string(injsonbytes)
-	} else {
-		injson = string(in)
+		if outputFormat == "yaml" {
+			return yaml.JSONToYAML([]byte(outjson))
+		}
+		return []byte(outjson), nil
 	}
 
-	outjson, err = Neat(injson)
+	docs, err := splitYAMLDocuments(in)
 	if err != nil {
-		return nil, fmt.Errorf("error neating : %v", err)
+		return nil, err
+	}
+	neated := make([]string, 0, len(docs))
+	for i, doc := range docs {
+		injson, err := yaml.YAMLToJSON(doc)
+		if err != nil {
+			return nil, fmt.Errorf("error converting from yaml to json%s : %v", docLabel(i, len(docs)), err)
+		}
+		if t := bytes.TrimSpace(injson); len(t) == 0 || string(t) == "null" {
+			continue // a document holding only comments
+		}
+		outjson, err := Neat(string(injson))
+		if err != nil {
+			return nil, fmt.Errorf("error neating%s : %v", docLabel(i, len(docs)), err)
+		}
+		neated = append(neated, outjson)
 	}
 
-	if outputFormat == "yaml" || (outputFormat == "same" && itsYaml) {
-		out, err = yaml.JSONToYAML([]byte(outjson))
+	if outputFormat == "json" {
+		if len(neated) == 1 {
+			return []byte(neated[0]), nil
+		}
+		list := `{"apiVersion":"v1","kind":"List","items":[]}`
+		for i, n := range neated {
+			if list, err = sjson.SetRaw(list, fmt.Sprintf("items.%d", i), n); err != nil {
+				return nil, fmt.Errorf("error building list : %v", err)
+			}
+		}
+		return []byte(list), nil
+	}
+
+	var buf bytes.Buffer
+	for i, n := range neated {
+		y, err := yaml.JSONToYAML([]byte(n))
 		if err != nil {
 			return nil, fmt.Errorf("error converting from json to yaml : %v", err)
 		}
-	} else {
-		out = []byte(outjson)
+		if i > 0 {
+			buf.WriteString("---\n")
+		}
+		buf.Write(y)
 	}
-	return
+	return buf.Bytes(), nil
+}
+
+// splitYAMLDocuments splits a YAML stream on '---' separator lines. It uses the same reader
+// kubectl does, so a separator is only recognised at the start of a line, never inside a
+// block scalar, and a leading '---' does not produce an empty document.
+func splitYAMLDocuments(in []byte) ([][]byte, error) {
+	reader := k8syaml.NewYAMLReader(bufio.NewReader(bytes.NewReader(in)))
+	var docs [][]byte
+	for {
+		doc, err := reader.Read()
+		if err == io.EOF {
+			return docs, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("error reading yaml document %d : %v", len(docs)+1, err)
+		}
+		docs = append(docs, doc)
+	}
+}
+
+func docLabel(i, n int) string {
+	if n == 1 {
+		return ""
+	}
+	return fmt.Sprintf(" (document %d of %d)", i+1, n)
 }

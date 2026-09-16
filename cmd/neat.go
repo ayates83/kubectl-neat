@@ -34,7 +34,11 @@ func Neat(in string) (string, error) {
 		return draft, fmt.Errorf("error in neatPod, input json is empty")
 	}
 	if !gjson.Valid(in) {
-		return draft, fmt.Errorf("error in neatPod, input is not a vaild json: %s", in[:20])
+		preview := in
+		if len(preview) > 20 {
+			preview = preview[:20]
+		}
+		return draft, fmt.Errorf("error in neatPod, input is not a valid json: %s", preview)
 	}
 
 	kind := gjson.Get(in, "kind").String()

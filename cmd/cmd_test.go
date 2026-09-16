@@ -193,3 +193,67 @@ func TestGetCmd(t *testing.T) {
 		}
 	}
 }
+
+func TestNeatYAMLOrJSONMultiDocument(t *testing.T) {
+	stream := `---
+# leading separator and a comment-only document must not produce output
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: first
+  uid: 00000000-0000-0000-0000-000000000001
+data:
+  script: |
+    echo start
+    ---
+    echo a separator inside a block scalar is data
+---   # a separator may carry a comment
+apiVersion: v1
+kind: Service
+metadata:
+  name: second
+spec:
+  clusterIP: 10.0.0.1
+  ports:
+  - port: 80
+`
+	out, err := NeatYAMLOrJSON([]byte(stream), "same")
+	if err != nil {
+		t.Fatalf("multi-document yaml: %v", err)
+	}
+	docs, err := splitYAMLDocuments(out)
+	if err != nil {
+		t.Fatalf("re-reading output: %v", err)
+	}
+	if len(docs) != 2 {
+		t.Fatalf("want 2 documents, have %d:\n%s", len(docs), out)
+	}
+	for _, unwanted := range []string{"uid:", "clusterIP:"} {
+		if strings.Contains(string(out), unwanted) {
+			t.Errorf("%q should have been neated from every document:\n%s", unwanted, out)
+		}
+	}
+	if !strings.Contains(string(out), "    ---\n    echo a separator") {
+		t.Errorf("block scalar content was split or altered:\n%s", out)
+	}
+
+	out, err = NeatYAMLOrJSON([]byte(stream), "json")
+	if err != nil {
+		t.Fatalf("multi-document yaml to json: %v", err)
+	}
+	if !strings.Contains(string(out), `"kind":"List"`) || strings.Count(string(out), `"apiVersion":"v1"`) != 3 {
+		t.Errorf("want a v1 List holding both documents, have:\n%s", out)
+	}
+
+	if _, err = NeatYAMLOrJSON([]byte("a: 1\n--- b: 2\n"), "same"); err == nil {
+		t.Errorf("want an error for content after a separator")
+	}
+}
+
+func TestNeatShortInvalidJSON(t *testing.T) {
+	// used to panic slicing in[:20]
+	if _, err := Neat("{bad"); err == nil {
+		t.Errorf("want an error for invalid json")
+	}
+}
