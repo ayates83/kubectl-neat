@@ -16,15 +16,20 @@ limitations under the License.
 package cmd
 
 import (
+	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"unicode"
 
 	"github.com/ghodss/yaml"
 	"github.com/spf13/cobra"
+	"github.com/tidwall/sjson"
+	k8syaml "k8s.io/apimachinery/pkg/util/yaml"
 )
 
 var outputFormat *string
@@ -33,6 +38,14 @@ var inputFile *string
 func init() {
 	outputFormat = rootCmd.PersistentFlags().StringP("output", "o", "yaml", "output format: yaml or json")
 	inputFile = rootCmd.Flags().StringP("file", "f", "-", "file path to neat, or - to read from stdin")
+	rootCmd.PersistentFlags().StringSliceVar(&userAnnotations, "strip-annotation", nil,
+		"annotation key to remove, repeatable or comma-separated; a trailing * matches a prefix (env "+stripAnnotationsEnv+")")
+	rootCmd.PersistentFlags().StringSliceVar(&userLabels, "strip-label", nil,
+		"label key to remove, repeatable or comma-separated; a trailing * matches a prefix (env "+stripLabelsEnv+")")
+	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
+		userAnnotations = append(userAnnotations, splitEnv(stripAnnotationsEnv)...)
+		userLabels = append(userLabels, splitEnv(stripLabelsEnv)...)
+	}
 	rootCmd.SetOut(os.Stdout)
 	rootCmd.SetErr(os.Stderr)
 	rootCmd.MarkFlagFilename("file")
@@ -40,28 +53,66 @@ func init() {
 	rootCmd.AddCommand(versionCmd)
 }
 
+const (
+	stripAnnotationsEnv = "KUBECTL_NEAT_STRIP_ANNOTATIONS"
+	stripLabelsEnv      = "KUBECTL_NEAT_STRIP_LABELS"
+)
+
+// splitEnv reads a comma-separated list from the environment, ignoring blanks.
+func splitEnv(name string) []string {
+	var out []string
+	for _, v := range strings.Split(os.Getenv(name), ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 // Execute is the entry point for the command package
 func Execute() {
-	if err := rootCmd.Execute(); err != nil {
+	rootCmd.SilenceErrors = true
+	err := rootCmd.Execute()
+	var exit exitError
+	switch {
+	case err == nil:
+	case errors.As(err, &exit):
+		os.Exit(exit.code) // diff: 1 means "differences found", not a failure to report
+	default:
+		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}
 }
 
 var rootCmd = &cobra.Command{
-	Use: "kubectl-neat",
+	Use:          "kubectl-neat",
+	SilenceUsage: true, // usage is for flag mistakes, not for bad input
 	Example: `kubectl get pod mypod -o yaml | kubectl neat
 kubectl get pod mypod -oyaml | kubectl neat -o json
 kubectl neat -f - <./my-pod.json
 kubectl neat -f ./my-pod.json
-kubectl neat -f ./my-pod.json --output yaml`,
+kubectl neat -f ./my-pod.json --output yaml
+kubectl get deploy -o yaml | kubectl neat --strip-annotation 'example.com/*' --strip-label team`,
+	Args: func(cmd *cobra.Command, args []string) error {
+		if diffMode {
+			return cobra.ExactArgs(2)(cmd, args)
+		}
+		return cobra.NoArgs(cmd, args)
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if diffMode {
+			return runNeatDiff(cmd, args[0], args[1])
+		}
 		var in, out []byte
 		var err error
 		if *inputFile == "-" {
 			stdin := cmd.InOrStdin()
-			in, err = ioutil.ReadAll(stdin)
+			in, err = io.ReadAll(stdin)
+			if err != nil {
+				return err
+			}
 		} else {
-			in, err = ioutil.ReadFile(*inputFile)
+			in, err = os.ReadFile(*inputFile)
 			if err != nil {
 				return err
 			}
@@ -89,34 +140,25 @@ kubectl neat get -- svc -n default myservice --output json`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var out []byte
 		var err error
-		//reset defaults
-		//there are two output settings in this subcommand: kubectl get's and kubectl-neat's
-		//any combination of those can be provided by using the output flag in either side of the --
-		//the most efficient is kubectl: json, kubectl-neat: yaml
-		//0--0->Y--J #choose what's best for us
-		//0--Y->Y--Y #user did specify output in kubectl, so respect that
-		//0--J->J--J #user did specify output in kubectl, so respect that
-		//Y--0->Y--J #user doesn't care about kubectl so use json but convert back
-		//J--0->J--J #user expects json so use it for foth
-		//if the user specified both side we can't touch it
-
-		//the desired kubectl get output is always json, unless it was explicitly set by the user to yaml in which case the arg is overriden when concatenating the args later
+		// kubectl is always asked for JSON, the cheapest input; a -o the user passes after
+		// "--" comes later on the command line and wins. The output format is, in order:
+		// kubectl-neat's own -o, else the format the user asked kubectl for, else YAML.
 		cmdArgs := append([]string{"get", "-o", "json"}, args...)
 		kubectlCmd := exec.Command(kubectl, cmdArgs...)
-		kres, err := kubectlCmd.CombinedOutput()
+		var stderr bytes.Buffer
+		kubectlCmd.Stderr = &stderr
+		kres, err := kubectlCmd.Output() // not CombinedOutput: warnings on stderr would corrupt the JSON
 		if err != nil {
-			return fmt.Errorf("Error invoking kubectl as %v %v", kubectlCmd.Args, err)
+			return fmt.Errorf("Error invoking kubectl as %v %v: %s", kubectlCmd.Args, err, bytes.TrimSpace(stderr.Bytes()))
 		}
-		//handle the case of 0--J->J--J
-		outFormat := *outputFormat
-		kubeout := "yaml"
-		for _, arg := range args {
-			if arg == "json" || arg == "ojson" {
-				outFormat = "json"
-			}
-		}
-		if !cmd.Flag("output").Changed && kubeout == "json" {
+		cmd.PrintErr(stderr.String())
+
+		outFormat := "yaml"
+		if f := kubectlOutputFormat(args); f == "json" {
 			outFormat = "json"
+		}
+		if cmd.Flag("output").Changed {
+			outFormat = *outputFormat
 		}
 		out, err = NeatYAMLOrJSON(kres, outFormat)
 		if err != nil {
@@ -125,6 +167,31 @@ kubectl neat get -- svc -n default myservice --output json`,
 		cmd.Println(string(out))
 		return nil
 	},
+}
+
+// kubectlOutputFormat returns the value of the last -o/--output flag in kubectl arguments,
+// in any of its spellings, or "" if there is none. A bare "json" is a resource name.
+func kubectlOutputFormat(args []string) string {
+	format := ""
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			return format
+		case a == "-o" || a == "--output":
+			if i+1 < len(args) {
+				i++
+				format = args[i]
+			}
+		case strings.HasPrefix(a, "--output="):
+			format = strings.TrimPrefix(a, "--output=")
+		case strings.HasPrefix(a, "-o="):
+			format = strings.TrimPrefix(a, "-o=")
+		case strings.HasPrefix(a, "-o") && !strings.HasPrefix(a, "--"):
+			format = strings.TrimPrefix(a, "-o")
+		}
+	}
+	return format
 }
 
 // populated by goreleaser
@@ -145,32 +212,89 @@ func isJSON(s []byte) bool {
 	return bytes.HasPrefix(bytes.TrimLeftFunc(s, unicode.IsSpace), []byte{'{'})
 }
 
-// NeatYAMLOrJSON converts 'in' to json if needed, invokes neat, and converts back if needed according the the outputFormat argument: yaml/json/same
+// NeatYAMLOrJSON converts 'in' to json if needed, invokes neat, and converts back if needed according the the outputFormat argument: yaml/json/same.
+// YAML input may hold several documents separated by '---' (#109). They are neated one by one and
+// written back as a YAML stream, or, when JSON output is requested, as the items of a v1 List.
 func NeatYAMLOrJSON(in []byte, outputFormat string) (out []byte, err error) {
-	var injson, outjson string
-	itsYaml := !isJSON(in)
-	if itsYaml {
-		injsonbytes, err := yaml.YAMLToJSON(in)
+	if isJSON(in) {
+		outjson, err := Neat(string(in))
 		if err != nil {
-			return nil, fmt.Errorf("error converting from yaml to json : %v", err)
+			return nil, fmt.Errorf("error neating : %v", err)
 		}
-		injson = string(injsonbytes)
-	} else {
-		injson = string(in)
+		if outputFormat == "yaml" {
+			return yaml.JSONToYAML([]byte(outjson))
+		}
+		return []byte(outjson), nil
 	}
 
-	outjson, err = Neat(injson)
+	docs, err := splitYAMLDocuments(in)
 	if err != nil {
-		return nil, fmt.Errorf("error neating : %v", err)
+		return nil, err
+	}
+	neated := make([]string, 0, len(docs))
+	for i, doc := range docs {
+		injson, err := yaml.YAMLToJSON(doc)
+		if err != nil {
+			return nil, fmt.Errorf("error converting from yaml to json%s : %v", docLabel(i, len(docs)), err)
+		}
+		if t := bytes.TrimSpace(injson); len(t) == 0 || string(t) == "null" {
+			continue // a document holding only comments
+		}
+		outjson, err := Neat(string(injson))
+		if err != nil {
+			return nil, fmt.Errorf("error neating%s : %v", docLabel(i, len(docs)), err)
+		}
+		neated = append(neated, outjson)
 	}
 
-	if outputFormat == "yaml" || (outputFormat == "same" && itsYaml) {
-		out, err = yaml.JSONToYAML([]byte(outjson))
+	if outputFormat == "json" {
+		if len(neated) == 1 {
+			return []byte(neated[0]), nil
+		}
+		list := `{"apiVersion":"v1","kind":"List","items":[]}`
+		for i, n := range neated {
+			if list, err = sjson.SetRaw(list, fmt.Sprintf("items.%d", i), n); err != nil {
+				return nil, fmt.Errorf("error building list : %v", err)
+			}
+		}
+		return []byte(list), nil
+	}
+
+	var buf bytes.Buffer
+	for i, n := range neated {
+		y, err := yaml.JSONToYAML([]byte(n))
 		if err != nil {
 			return nil, fmt.Errorf("error converting from json to yaml : %v", err)
 		}
-	} else {
-		out = []byte(outjson)
+		if i > 0 {
+			buf.WriteString("---\n")
+		}
+		buf.Write(y)
 	}
-	return
+	return buf.Bytes(), nil
+}
+
+// splitYAMLDocuments splits a YAML stream on '---' separator lines. It uses the same reader
+// kubectl does, so a separator is only recognised at the start of a line, never inside a
+// block scalar, and a leading '---' does not produce an empty document.
+func splitYAMLDocuments(in []byte) ([][]byte, error) {
+	reader := k8syaml.NewYAMLReader(bufio.NewReader(bytes.NewReader(in)))
+	var docs [][]byte
+	for {
+		doc, err := reader.Read()
+		if err == io.EOF {
+			return docs, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("error reading yaml document %d : %v", len(docs)+1, err)
+		}
+		docs = append(docs, doc)
+	}
+}
+
+func docLabel(i, n int) string {
+	if n == 1 {
+		return ""
+	}
+	return fmt.Sprintf(" (document %d of %d)", i+1, n)
 }

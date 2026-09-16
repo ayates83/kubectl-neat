@@ -1,3 +1,4 @@
+version: 2
 builds:
 - main: ./main.go
   env:
@@ -5,17 +6,18 @@ builds:
   goos:
     - darwin
     - linux
+    - windows
   goarch:
     - amd64
     - arm64
   ldflags:
-    - -s -w -X github.com/itaysk/kubectl-neat/cmd.Version={{ .Version }}
+    - -s -w -X github.com/ayates83/kubectl-neat/cmd.Version={{ .Version }}
 archives:
 - name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
 checksum:
   name_template: 'checksums.txt'
 snapshot:
-  name_template: "{{ .Tag }}-next"
+  version_template: "{{ .Tag }}-next"
 changelog:
   filters:
     exclude:

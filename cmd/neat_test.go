@@ -21,7 +21,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/itaysk/kubectl-neat/pkg/testutil"
+	"github.com/ayates83/kubectl-neat/pkg/testutil"
 )
 
 func TestNeatMetadata(t *testing.T) {
@@ -255,9 +255,9 @@ func TestNeatServiceAccount(t *testing.T) {
 		},
 	}
 	for _, c := range cases {
-		resJSON, err := neatServiceAccount(c.data)
+		resJSON, err := neatServiceAccountToken(c.data)
 		if err != nil {
-			t.Errorf("error in neatServiceAccount for case '%s': %v", c.title, err)
+			t.Errorf("error in neatServiceAccountToken for case '%s': %v", c.title, err)
 			continue
 		}
 		equal, err := testutil.JSONEqual(resJSON, c.expect)
@@ -353,7 +353,7 @@ func TestNeat(t *testing.T) {
 				continue
 			}
 			if !equal {
-				t.Errorf("test case failed: %s:\nhave %s\nwant %s", fName, string(expBytes), resJSON)
+				t.Errorf("test case failed: %s:\nhave %s\nwant %s", fName, resJSON, string(expBytes))
 			}
 		}
 	}
