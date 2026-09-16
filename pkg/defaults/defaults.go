@@ -3,6 +3,9 @@ package defaults
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/jeremywohl/flatten"
 	log "github.com/sirupsen/logrus"
@@ -28,47 +31,146 @@ import (
 	storagev1 "k8s.io/kubernetes/pkg/apis/storage/v1"
 )
 
+// maxPasses bounds the fixpoint loop in NeatDefaults. Real objects settle in two or three.
+const maxPasses = 10
+
 // NeatDefaults gets a json document representing a Kubernetes resource, and removes all fields with default values.
 // default values is determined by invoking the "defaulting" code from Kubernetes apimachinery
+//
+// Some defaults depend on each other: a Job's completions and parallelism both default to 1 only
+// when both are absent. A single pass tests each field with the others still present, so it can
+// stop short (and a second run removes more), or in principle remove two fields that are each
+// default alone but not together. NeatDefaults therefore repeats passes until nothing changes, and
+// accepts a pass only if defaulting the result gives back every removed field's original value.
 func NeatDefaults(in string) (string, error) {
-	var err error
-
 	var pom metav1.PartialObjectMetadata
-	err = json.Unmarshal([]byte(in), &pom)
-	if err != nil {
+	if err := json.Unmarshal([]byte(in), &pom); err != nil {
 		return "", fmt.Errorf("error unmarshaling as PartialObject : %v", err)
 	}
 	if !myscheme.Recognizes(pom.GroupVersionKind()) {
 		return in, nil
 	}
-
-	specJSON := gjson.Get(in, "spec")
-	if !specJSON.Exists() {
+	if !gjson.Get(in, "spec").Exists() {
 		return in, nil
 	}
-	pathsToDelete, err := flatMapJSON(specJSON.String(), "spec.")
-	if err != nil {
-		return "", fmt.Errorf("error flattening json : %v", err)
+
+	removed := map[string]interface{}{} // every path removed so far, with its value in the input
+	for pass := 0; pass < maxPasses; pass++ {
+		candidates, err := defaultPaths(in)
+		if err != nil {
+			return "", err
+		}
+		if len(candidates) == 0 {
+			break
+		}
+		out, accepted := removeVerified(in, candidates, removed)
+		if len(accepted) == 0 {
+			break
+		}
+		for p, v := range accepted {
+			removed[p] = v
+		}
+		in = out
 	}
-	for k, v := range pathsToDelete {
+	return in, nil
+}
+
+// defaultPaths returns the leaf paths under spec whose value equals what defaulting would set
+// if that one field were absent.
+func defaultPaths(in string) (map[string]interface{}, error) {
+	paths, err := flatMapJSON(gjson.Get(in, "spec").String(), "spec.")
+	if err != nil {
+		return nil, fmt.Errorf("error flattening json : %v", err)
+	}
+	for k, v := range paths {
 		isDefault, err := isDefault(k, v, in)
 		if err != nil {
 			log.Error(fmt.Errorf("error determining default for '%s' : %v", k, err))
+			delete(paths, k)
 			continue
 		}
 		if !isDefault {
-			// don't want to delete from 'in' yet because that would affect the following isDefault tests
-			delete(pathsToDelete, k)
+			delete(paths, k)
 		}
 	}
-	for k := range pathsToDelete {
-		in, err = sjson.Delete(in, k)
-		if err != nil {
-			log.Error(fmt.Errorf("error deleting default '%s' : %v", k, err))
+	return paths, nil
+}
+
+// removeVerified removes candidates from in, keeping only removals that defaulting reverses.
+// It first tries all candidates at once; if the result does not default back to the original
+// values of everything removed so far, it adds candidates one at a time in a fixed order.
+func removeVerified(in string, candidates, removedBefore map[string]interface{}) (string, map[string]interface{}) {
+	all, ok := deletePaths(in, sortedKeys(candidates))
+	if ok && restores(all, removedBefore, candidates) {
+		return all, candidates
+	}
+	accepted := map[string]interface{}{}
+	for _, p := range sortedKeys(candidates) {
+		next, ok := deletePaths(in, []string{p})
+		if !ok || !restores(next, removedBefore, accepted, map[string]interface{}{p: candidates[p]}) {
 			continue
 		}
+		in = next
+		accepted[p] = candidates[p]
 	}
-	return in, nil
+	return in, accepted
+}
+
+// deletePaths deletes paths deepest-first, so removing an array element cannot shift the index
+// of another path in the same array.
+func deletePaths(in string, paths []string) (string, bool) {
+	var err error
+	for i := len(paths) - 1; i >= 0; i-- {
+		if in, err = sjson.Delete(in, paths[i]); err != nil {
+			log.Error(fmt.Errorf("error deleting default '%s' : %v", paths[i], err))
+			return "", false
+		}
+	}
+	return in, true
+}
+
+// restores reports whether defaulting obj sets every path in want back to its value.
+func restores(obj string, want ...map[string]interface{}) bool {
+	defaulted, err := applyDefaults(obj)
+	if err != nil {
+		log.Error(fmt.Errorf("error verifying defaults : %v", err))
+		return false
+	}
+	for _, m := range want {
+		for p, v := range m {
+			if gjson.Get(defaulted, p).String() != fmt.Sprintf("%v", v) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// sortedKeys orders paths segment by segment, comparing array indices numerically, so that
+// spec.args.2 sorts before spec.args.10 and deleting in reverse order never shifts an index.
+func sortedKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool { return pathLess(keys[i], keys[j]) })
+	return keys
+}
+
+func pathLess(a, b string) bool {
+	as, bs := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < len(as) && i < len(bs); i++ {
+		if as[i] == bs[i] {
+			continue
+		}
+		an, aerr := strconv.Atoi(as[i])
+		bn, berr := strconv.Atoi(bs[i])
+		if aerr == nil && berr == nil {
+			return an < bn
+		}
+		return as[i] < bs[i]
+	}
+	return len(as) < len(bs)
 }
 
 // flatMapJSON gets a json document and builds a map of all the leaf keys and their values
@@ -135,19 +237,24 @@ func computeDefault(path string, objJSON string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("error deleting path to default '%s' : %v", path, err)
 	}
-	candidate, _, err := decoder.Decode([]byte(candidateJSON), nil, nil)
+	resJSON, err := applyDefaults(candidateJSON)
+	if err != nil {
+		return "", err
+	}
+	return gjson.Get(resJSON, path).String(), nil
+}
+
+// applyDefaults decodes objJSON, runs the API server's defaulting functions on it, and
+// returns the result as JSON.
+func applyDefaults(objJSON string) (string, error) {
+	obj, _, err := decoder.Decode([]byte(objJSON), nil, nil)
 	if err != nil {
 		return "", fmt.Errorf("error decoding into kubernetes object : %v", err)
 	}
-
-	// why this doesn't work?
-	//scheme.Scheme.Default(candidate)
-	myscheme.Default(candidate)
-
-	resJSON, err := json.Marshal(candidate)
+	myscheme.Default(obj)
+	resJSON, err := json.Marshal(obj)
 	if err != nil {
 		return "", fmt.Errorf("error marshaling kubernetes object : %v", err)
 	}
-	defaultValue := gjson.Get(string(resJSON), path).String()
-	return defaultValue, nil
+	return string(resJSON), nil
 }

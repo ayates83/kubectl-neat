@@ -184,8 +184,16 @@ PersistentVolumeClaims | binder annotations; `volumeName` only when the binder c
 Namespaces | the `kubernetes.io/metadata.name` label and the `kubernetes` finalizer
 All templates | `creationTimestamp: null`
 kubelet, CNI | static-pod `kubernetes.io/config.*`; Multus, OVN-Kubernetes and Calico pod-network annotations
-OpenShift | `openshift.io/scc` and the validated subject type; per-cluster `sa.scc` UID, group and MCS ranges; `openshift.io/requester`; the generated `<sa>-dockercfg-*` pull secret on Pods; on Routes, a generated `spec.host` and the Route API defaults
+OpenShift | `openshift.io/scc` and the validated subject type; per-cluster `sa.scc` UID, group and MCS ranges; on Pods admitted through an SCC, the `runAsUser`, `fsGroup` and SELinux level it injected from that namespace's allocation (restricted-v2 rejects them in any other namespace); `openshift.io/requester`; the generated `<sa>-dockercfg-*` pull secret on Pods; on Routes, a generated `spec.host` and the Route API defaults
 GitOps | Argo CD `tracking-id`, Flux `kustomize.toolkit.fluxcd.io/*` and `helm.toolkit.fluxcd.io/*` labels, kustomize `config.kubernetes.io/origin`
+
+### Known limitations
+
+- **Allocated `nodePort`s are kept.** Without `managedFields` (which `kubectl get` omits) a port the
+  cluster picked cannot be told from one that was pinned, and dropping a pinned port breaks its
+  clients. Re-creating a NodePort Service in the same cluster fails until you remove it.
+- **Values you set to their default are removed too.** The result is equivalent on apply, but
+  the output no longer shows that you chose it.
 
 ## What's new in this fork
 

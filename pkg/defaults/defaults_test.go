@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/ayates83/kubectl-neat/pkg/testutil"
+	"github.com/tidwall/gjson"
 )
 
 func TestComputeDefault(t *testing.T) {
@@ -448,5 +449,49 @@ func TestNeatDefault(t *testing.T) {
 		if !equal {
 			t.Errorf("test case '%s' failed. want: '%s' have: '%s'", c.title, c.expect, resJSON)
 		}
+	}
+}
+
+func TestNeatDefaultsInterdependent(t *testing.T) {
+	// completions and parallelism each default to 1 only when the other is absent too.
+	// A single pass kept completions; a second run then removed it.
+	job := `{"apiVersion":"batch/v1","kind":"Job","metadata":{"name":"once"},"spec":{
+		"backoffLimit":6,"completionMode":"NonIndexed","completions":1,"manualSelector":false,"parallelism":1,"suspend":false,
+		"template":{"spec":{"containers":[{"name":"c","image":"i"}],"restartPolicy":"Never"}}}}`
+	once, err := NeatDefaults(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	twice, err := NeatDefaults(once)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if once != twice {
+		t.Errorf("not idempotent:\nonce:  %s\ntwice: %s", once, twice)
+	}
+	for _, p := range []string{"spec.completions", "spec.parallelism", "spec.backoffLimit", "spec.completionMode", "spec.suspend"} {
+		if gjson.Get(once, p).Exists() {
+			t.Errorf("%s should have been removed: %s", p, once)
+		}
+	}
+
+	// Authored values that differ from the default must survive, whatever their neighbours are.
+	job = `{"apiVersion":"batch/v1","kind":"Job","metadata":{"name":"batch"},"spec":{"completions":5,"parallelism":1,
+		"template":{"spec":{"containers":[{"name":"c","image":"i"}],"restartPolicy":"Never"}}}}`
+	out, err := NeatDefaults(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gjson.Get(out, "spec.completions").Int() != 5 {
+		t.Errorf("completions: 5 is authored and must stay: %s", out)
+	}
+}
+
+func TestPathLess(t *testing.T) {
+	if !pathLess("spec.args.2", "spec.args.10") || pathLess("spec.args.10", "spec.args.2") {
+		t.Errorf("array indices must compare numerically")
+	}
+	if !pathLess("spec.a", "spec.a.b") || !pathLess("spec.a.x", "spec.b") {
+		t.Errorf("paths must order by segment")
 	}
 }
