@@ -281,6 +281,10 @@ func neatPodAdmission(in string) (string, error) {
 		}
 	}
 
+	if in, err = neatSCCAllocations(in); err != nil {
+		return in, err
+	}
+
 	// OpenShift links the service account's generated pull secret into every pod.
 	sa := gjson.Get(in, "spec.serviceAccountName").String()
 	if sa == "" {
@@ -297,6 +301,52 @@ func neatPodAdmission(in string) (string, error) {
 	}
 
 	return neatServiceAccountToken(in)
+}
+
+// sccMCSLevel is the shape of the per-namespace SELinux level OpenShift allocates.
+var sccMCSLevel = regexp.MustCompile(`^s0:c[0-9]+,c[0-9]+$`)
+
+// isSCCAllocatedID reports whether id looks like the start of an OpenShift namespace UID/GID
+// block: the default allocator hands out blocks of 10000 from 1000000000.
+func isSCCAllocatedID(r gjson.Result) bool {
+	id := r.Int()
+	return r.Type == gjson.Number && id >= 1000000000 && id%10000 == 0
+}
+
+// neatSCCAllocations removes the user ID, fsGroup and SELinux level that OpenShift's SCC
+// admission injects from the namespace's openshift.io/sa.scc.* allocation. They are valid only
+// in the namespace they came from: restricted-v2 rejects them anywhere else. Verified against a
+// live cluster: the neated pod was forbidden for a non-admin user in a second namespace, and
+// accepted with these three removed, when SCC admission re-injected that namespace's values.
+// Only pods admitted through an SCC (openshift.io/scc present) are touched.
+func neatSCCAllocations(in string) (string, error) {
+	var err error
+	if !gjson.Get(in, "metadata.annotations."+escapeKey("openshift.io/scc")).Exists() {
+		return in, nil
+	}
+	del := func(path string) {
+		if err == nil {
+			in, err = sjson.Delete(in, path)
+		}
+	}
+	if isSCCAllocatedID(gjson.Get(in, "spec.securityContext.fsGroup")) {
+		del("spec.securityContext.fsGroup")
+	}
+	if isSCCAllocatedID(gjson.Get(in, "spec.securityContext.runAsUser")) {
+		del("spec.securityContext.runAsUser")
+	}
+	se := gjson.Get(in, "spec.securityContext.seLinuxOptions")
+	if se.IsObject() && len(se.Map()) == 1 && sccMCSLevel.MatchString(se.Get("level").String()) {
+		del("spec.securityContext.seLinuxOptions")
+	}
+	for _, cs := range []string{"spec.containers", "spec.initContainers", "spec.ephemeralContainers"} {
+		for i, c := range gjson.Get(in, cs).Array() {
+			if isSCCAllocatedID(c.Get("securityContext.runAsUser")) {
+				del(fmt.Sprintf("%s.%d.securityContext.runAsUser", cs, i))
+			}
+		}
+	}
+	return in, err
 }
 
 // neatServiceAccountToken removes the projected token volume (kube-api-access-*, since
