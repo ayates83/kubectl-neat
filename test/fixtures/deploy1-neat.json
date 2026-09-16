@@ -1,7 +1,7 @@
 {
     "apiVersion": "apps/v1",
     "kind": "Deployment",
-    "metadata": {"annotations":{"deployment.kubernetes.io/revision":"1"},"labels":{"app":"web"},"name":"web","namespace":"demo"},
+    "metadata": {"labels":{"app":"web"},"name":"web","namespace":"demo"},
     "spec": {
         "selector": {
             "matchLabels": {
@@ -10,7 +10,6 @@
         },
         "template": {
             "metadata": {
-                "creationTimestamp": null,
                 "labels": {
                     "app": "web"
                 }

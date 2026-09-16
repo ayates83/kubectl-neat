@@ -71,11 +71,9 @@ func Neat(in string) (string, error) {
 	if err != nil {
 		return draft, fmt.Errorf("error in neatScheduler : %v", err)
 	}
-	if kind == "Pod" {
-		draft, err = neatServiceAccount(draft)
-		if err != nil {
-			return draft, fmt.Errorf("error in neatServiceAccount : %v", err)
-		}
+	draft, err = neatServerPopulated(draft)
+	if err != nil {
+		return draft, fmt.Errorf("error in neatServerPopulated : %v", err)
 	}
 
 	// general neating
@@ -116,38 +114,6 @@ func neatStatus(in string) (string, error) {
 
 func neatScheduler(in string) (string, error) {
 	return sjson.Delete(in, "spec.nodeName")
-}
-
-func neatServiceAccount(in string) (string, error) {
-	var err error
-	// keep an eye open on https://github.com/tidwall/sjson/issues/11
-	// when it's implemented, we can do:
-	// sjson.delete(in, "spec.volumes.#(name%default-token-*)")
-	// sjson.delete(in, "spec.containers.#.volumeMounts.#(name%default-token-*)")
-
-	for vi, v := range gjson.Get(in, "spec.volumes").Array() {
-		vname := v.Get("name").String()
-		if strings.HasPrefix(vname, "default-token-") {
-			in, err = sjson.Delete(in, fmt.Sprintf("spec.volumes.%d", vi))
-			if err != nil {
-				continue
-			}
-		}
-	}
-	for ci, c := range gjson.Get(in, "spec.containers").Array() {
-		for vmi, vm := range c.Get("volumeMounts").Array() {
-			vmname := vm.Get("name").String()
-			if strings.HasPrefix(vmname, "default-token-") {
-				in, err = sjson.Delete(in, fmt.Sprintf("spec.containers.%d.volumeMounts.%d", ci, vmi))
-				if err != nil {
-					continue
-				}
-			}
-		}
-	}
-	in, _ = sjson.Delete(in, "spec.serviceAccount") //Deprecated: Use serviceAccountName instead
-
-	return in, nil
 }
 
 // neatEmpty removes all zero length elements in the json
