@@ -18,6 +18,7 @@ package cmd
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -70,7 +71,15 @@ func splitEnv(name string) []string {
 
 // Execute is the entry point for the command package
 func Execute() {
-	if err := rootCmd.Execute(); err != nil {
+	rootCmd.SilenceErrors = true
+	err := rootCmd.Execute()
+	var exit exitError
+	switch {
+	case err == nil:
+	case errors.As(err, &exit):
+		os.Exit(exit.code) // diff: 1 means "differences found", not a failure to report
+	default:
+		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}
 }
@@ -84,7 +93,16 @@ kubectl neat -f - <./my-pod.json
 kubectl neat -f ./my-pod.json
 kubectl neat -f ./my-pod.json --output yaml
 kubectl get deploy -o yaml | kubectl neat --strip-annotation 'example.com/*' --strip-label team`,
+	Args: func(cmd *cobra.Command, args []string) error {
+		if diffMode {
+			return cobra.ExactArgs(2)(cmd, args)
+		}
+		return cobra.NoArgs(cmd, args)
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if diffMode {
+			return runNeatDiff(cmd, args[0], args[1])
+		}
 		var in, out []byte
 		var err error
 		if *inputFile == "-" {
