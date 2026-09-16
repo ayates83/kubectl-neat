@@ -38,12 +38,21 @@ make build            # binary in dist/
 ```
 
 or download a binary for Linux, macOS or Windows from
-[Releases](https://github.com/ayates83/kubectl-neat/releases).
+[Releases](https://github.com/ayates83/kubectl-neat/releases). Each release also carries a krew
+manifest (substitute the release you want):
+
+```bash
+kubectl krew install --manifest-url=https://github.com/ayates83/kubectl-neat/releases/download/v3.0.0/neat.yaml
+```
+
+On macOS the binaries are not notarized; if Gatekeeper blocks one, run
+`xattr -d com.apple.quarantine ./kubectl-neat`.
 
 `go install` does not work: kubectl-neat uses the defaulting code in `k8s.io/kubernetes`,
 which can only be imported with `replace` directives, and `go install` ignores them.
 
-`kubectl krew install neat` installs the original upstream plugin, not this fork.
+`kubectl krew install neat` installs the original upstream plugin (`v2.x`), not this fork (`v3.x`).
+`kubectl neat version` tells them apart.
 
 When used as a kubectl plugin the command is `kubectl neat`, and when used as a standalone
 executable it's `kubectl-neat`.

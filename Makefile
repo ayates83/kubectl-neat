@@ -19,7 +19,7 @@ test-unit:
 test-e2e: dist/kubectl-neat_$(os)_$(arch)
 	bats ./test/e2e-cli.bats
 
-test-integration: dist/kubectl-neat_$(os)_$(arch).tar.gz dist/kubectl-neat_$(os)_$(arch)*/kubectl-neat dist/checksums.txt
+test-integration: dist/checksums.txt
 	bats ./test/e2e-kubectl.bats
 	bats ./test/e2e-krew.bats
 
@@ -38,28 +38,15 @@ endif
 goreleaser: $(SRC)
 	goreleaser --clean $(goreleaserflags) 
 
-dist/kubectl-neat_darwin_arm64.tar.gz dist/kubectl-neat_darwin_amd64.tar.gz dist/kubectl-neat_linux_arm64.tar.gz dist/kubectl-neat_linux_amd64.tar.gz dist/checksums.txt: goreleaser
+dist/checksums.txt: goreleaser
 	# no op recipe
 	@:
 
+# Releases are normally cut by pushing a tag: .github/workflows/release.yml builds and
+# publishes them. This target is the manual equivalent, run on a checked-out tag.
 release: publish = 1
-release: dist/kubectl-neat_darwin_arm64.tar.gz dist/kubectl-neat_darwin_amd64.tar.gz dist/kubectl-neat_linux_arm64.tar.gz dist/kubectl-neat_linux_amd64.tar.gz dist/checksums.txt
-	./krew-package.sh 'darwin' 'arm64' 'neat' './dist'
-	./krew-package.sh 'darwin' 'amd64' 'neat' './dist'
-	./krew-package.sh 'linux' 'arm64' 'neat' './dist'
-	./krew-package.sh 'linux' 'amd64' 'neat' './dist'
-	# merge
-	yq -o json "dist/kubectl-neat_darwin_amd64.yaml" > dist/darwin-amd64.json
-	yq -o json "dist/kubectl-neat_darwin_arm64.yaml" > dist/darwin-arm64.json
-	yq -o json "dist/kubectl-neat_linux_amd64.yaml" > dist/linux-amd64.json
-	yq -o json "dist/kubectl-neat_linux_arm64.yaml" > dist/linux-arm64.json
-
-	rm dist/kubectl-neat_darwin_arm64.yaml dist/kubectl-neat_darwin_amd64.yaml dist/kubectl-neat_linux_arm64.yaml dist/kubectl-neat_linux_amd64.yaml
-	jq --slurp '.[0].spec.platforms += .[1].spec.platforms | .[0]' 'dist/darwin-amd64.json' 'dist/darwin-arm64.json' > 'dist/darwin.json'
-	jq --slurp '.[0].spec.platforms += .[1].spec.platforms | .[0]' 'dist/linux-amd64.json' 'dist/linux-arm64.json' > 'dist/linux.json'
-	jq --slurp '.[0].spec.platforms += .[1].spec.platforms | .[0]' 'dist/linux.json' 'dist/darwin.json' > 'dist/kubectl-neat.json'
-	yq -o yaml --prettyPrint dist/kubectl-neat.json > dist/kubectl-neat.yaml
-	rm dist/kubectl-neat.json dist/darwin.json dist/linux.json dist/darwin-amd64.json dist/darwin-arm64.json dist/linux-amd64.json dist/linux-arm64.json
+release: dist/checksums.txt
+	hack/krew-manifest.sh "$$(git describe --tags --exact-match)" dist > dist/neat.yaml
 
 clean:
 	rm -rf dist
