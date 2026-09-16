@@ -3,11 +3,13 @@ package defaults
 import (
 	"encoding/json"
 	"fmt"
+	goruntime "runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
-	"github.com/jeremywohl/flatten"
+	"github.com/ayates83/kubectl-neat/pkg/jsonpath"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -82,18 +84,63 @@ func defaultPaths(in string) (map[string]interface{}, error) {
 	if err != nil {
 		return nil, fmt.Errorf("error flattening json : %v", err)
 	}
-	for k, v := range paths {
-		isDefault, err := isDefault(k, v, in)
-		if err != nil {
-			log.Error(fmt.Errorf("error determining default for '%s' : %v", k, err))
-			delete(paths, k)
-			continue
+	// Each check decodes and defaults the whole object, and they are independent: run them
+	// concurrently. The scheme and decoder are read-only after init.
+	keys := sortedKeys(paths)
+	results := make([]bool, len(keys))
+	errs := make([]error, len(keys))
+	var wg sync.WaitGroup
+	next := make(chan int)
+	for w := 0; w < goruntime.GOMAXPROCS(0); w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range next {
+				results[i], errs[i] = isDefault(keys[i], paths[keys[i]], in)
+			}
+		}()
+	}
+	for i := range keys {
+		next <- i
+	}
+	close(next)
+	wg.Wait()
+	for i, k := range keys {
+		if errs[i] != nil {
+			log.Error(fmt.Errorf("error determining default for '%s' : %v", k, errs[i]))
 		}
-		if !isDefault {
+		if errs[i] != nil || !results[i] {
 			delete(paths, k)
 		}
 	}
+	keepListElementsReadable(in, paths)
 	return paths, nil
+}
+
+// keepListElementsReadable drops candidates that would leave a list element as {}.
+// The element must stay (an empty NetworkPolicy port still means "TCP, any port"), and
+// {"protocol": "TCP"} says that where {} does not.
+func keepListElementsReadable(in string, candidates map[string]interface{}) {
+	byParent := map[string][]string{}
+	for p := range candidates {
+		if i := strings.LastIndex(p, "."); i > 0 && !strings.HasSuffix(p[:i], `\`) {
+			byParent[p[:i]] = append(byParent[p[:i]], p)
+		}
+	}
+	for parent, children := range byParent {
+		i := strings.LastIndex(parent, ".")
+		if i < 0 {
+			continue
+		}
+		if _, err := strconv.Atoi(parent[i+1:]); err != nil || !gjson.Get(in, parent[:i]).IsArray() {
+			continue // not a list element
+		}
+		if obj := gjson.Get(in, parent); obj.IsObject() && len(obj.Map()) == len(children) {
+			for _, c := range children {
+				delete(candidates, c)
+			}
+		}
+	}
 }
 
 // removeVerified removes candidates from in, keeping only removals that defaulting reverses.
@@ -138,7 +185,7 @@ func restores(obj string, want ...map[string]interface{}) bool {
 	}
 	for _, m := range want {
 		for p, v := range m {
-			if gjson.Get(defaulted, p).String() != fmt.Sprintf("%v", v) {
+			if r := gjson.Get(defaulted, p); !r.Exists() || r.String() != fmt.Sprintf("%v", v) {
 				return false
 			}
 		}
@@ -173,18 +220,47 @@ func pathLess(a, b string) bool {
 	return len(as) < len(bs)
 }
 
-// flatMapJSON gets a json document and builds a map of all the leaf keys and their values
+// flatMapJSON gets a json document and builds a map of all the leaf keys and their values.
+// Keys are escaped path components, so a key like "kubernetes.io/os" is addressed exactly.
+// Empty objects and arrays have no leaves and produce no entries.
 func flatMapJSON(j string, prefix string) (map[string]interface{}, error) {
-	var jParsed map[string]interface{}
-	err := json.Unmarshal([]byte(j), &jParsed)
-	if err != nil {
+	var parsed interface{}
+	if err := json.Unmarshal([]byte(j), &parsed); err != nil {
 		return nil, fmt.Errorf("error unmarshaling: %v", err)
 	}
-	res, err := flatten.Flatten(jParsed, prefix, flatten.DotStyle)
-	if err != nil {
-		return nil, err
+	if _, ok := parsed.(map[string]interface{}); !ok {
+		return nil, fmt.Errorf("error flattening json : not an object")
 	}
+	res := map[string]interface{}{}
+	flattenInto(res, strings.TrimSuffix(prefix, "."), parsed)
 	return res, nil
+}
+
+func flattenInto(res map[string]interface{}, path string, v interface{}) {
+	child := func(part string) string {
+		if path == "" {
+			return part
+		}
+		return jsonpath.Join(path, part)
+	}
+	switch vt := v.(type) {
+	case map[string]interface{}:
+		for k, c := range vt {
+			flattenInto(res, child(jsonpath.Escape(k)), c)
+		}
+	case []interface{}:
+		for i, c := range vt {
+			switch c.(type) {
+			case map[string]interface{}, []interface{}:
+				flattenInto(res, child(jsonpath.Index(i)), c)
+			default:
+				// A scalar list element (an argument, a finalizer) is never a default candidate:
+				// defaulting does not fill in list items, and deleting one shifts the rest.
+			}
+		}
+	default:
+		res[path] = v
+	}
 }
 
 var myscheme *runtime.Scheme
@@ -223,25 +299,34 @@ func init() {
 
 // isDefault determins if the observed 'value' of the 'path' (gjson path) to field  in 'objJSON' is a default value
 func isDefault(path string, value interface{}, objJSON string) (bool, error) {
-	computed, err := computeDefault(path, objJSON)
+	computed, set, err := defaultFor(path, objJSON)
 	if err != nil {
 		return false, fmt.Errorf("error computing default for '%s' : %v", path, err)
 	}
-	expect := fmt.Sprintf("%v", value)
-	return computed == expect, nil
+	// A field defaulting leaves unset is not default, even when its value reads as "": an empty
+	// label value or argument is data.
+	return set && computed == fmt.Sprintf("%v", value), nil
 }
 
 // computeDefault returns the default value for the 'path' (gjson path) to field in 'objJSON'
 func computeDefault(path string, objJSON string) (string, error) {
+	value, _, err := defaultFor(path, objJSON)
+	return value, err
+}
+
+// defaultFor returns the value defaulting sets at path when the field is absent, and whether it
+// sets one at all.
+func defaultFor(path string, objJSON string) (string, bool, error) {
 	candidateJSON, err := sjson.Delete(objJSON, path)
 	if err != nil {
-		return "", fmt.Errorf("error deleting path to default '%s' : %v", path, err)
+		return "", false, fmt.Errorf("error deleting path to default '%s' : %v", path, err)
 	}
 	resJSON, err := applyDefaults(candidateJSON)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	return gjson.Get(resJSON, path).String(), nil
+	r := gjson.Get(resJSON, path)
+	return r.String(), r.Exists(), nil
 }
 
 // applyDefaults decodes objJSON, runs the API server's defaulting functions on it, and

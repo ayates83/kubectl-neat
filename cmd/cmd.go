@@ -18,6 +18,7 @@ package cmd
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -164,7 +165,7 @@ kubectl neat get -- svc -n default myservice --output json`,
 		if err != nil {
 			return err
 		}
-		cmd.Println(string(out))
+		cmd.Print(string(out))
 		return nil
 	},
 }
@@ -208,8 +209,10 @@ var versionCmd = &cobra.Command{
 	},
 }
 
+// isJSON reports whether s is a JSON document. A leading '{' is not enough: a YAML stream can
+// start with a flow mapping such as "{}" followed by "---", and YAML parses JSON anyway.
 func isJSON(s []byte) bool {
-	return bytes.HasPrefix(bytes.TrimLeftFunc(s, unicode.IsSpace), []byte{'{'})
+	return bytes.HasPrefix(bytes.TrimLeftFunc(s, unicode.IsSpace), []byte{'{'}) && json.Valid(s)
 }
 
 // NeatYAMLOrJSON converts 'in' to json if needed, invokes neat, and converts back if needed according the the outputFormat argument: yaml/json/same.
@@ -222,9 +225,9 @@ func NeatYAMLOrJSON(in []byte, outputFormat string) (out []byte, err error) {
 			return nil, fmt.Errorf("error neating : %v", err)
 		}
 		if outputFormat == "yaml" {
-			return yaml.JSONToYAML([]byte(outjson))
+			return jsonToYAML([]byte(outjson))
 		}
-		return []byte(outjson), nil
+		return indentJSON(outjson)
 	}
 
 	docs, err := splitYAMLDocuments(in)
@@ -235,6 +238,9 @@ func NeatYAMLOrJSON(in []byte, outputFormat string) (out []byte, err error) {
 	for i, doc := range docs {
 		injson, err := yaml.YAMLToJSON(doc)
 		if err != nil {
+			if bytes.HasPrefix(bytes.TrimLeftFunc(in, unicode.IsSpace), []byte{'{'}) {
+				return nil, fmt.Errorf("input is neither valid JSON nor valid YAML%s : %v", docLabel(i, len(docs)), err)
+			}
 			return nil, fmt.Errorf("error converting from yaml to json%s : %v", docLabel(i, len(docs)), err)
 		}
 		if t := bytes.TrimSpace(injson); len(t) == 0 || string(t) == "null" {
@@ -249,7 +255,7 @@ func NeatYAMLOrJSON(in []byte, outputFormat string) (out []byte, err error) {
 
 	if outputFormat == "json" {
 		if len(neated) == 1 {
-			return []byte(neated[0]), nil
+			return indentJSON(neated[0])
 		}
 		list := `{"apiVersion":"v1","kind":"List","items":[]}`
 		for i, n := range neated {
@@ -257,12 +263,12 @@ func NeatYAMLOrJSON(in []byte, outputFormat string) (out []byte, err error) {
 				return nil, fmt.Errorf("error building list : %v", err)
 			}
 		}
-		return []byte(list), nil
+		return indentJSON(list)
 	}
 
 	var buf bytes.Buffer
 	for i, n := range neated {
-		y, err := yaml.JSONToYAML([]byte(n))
+		y, err := jsonToYAML([]byte(n))
 		if err != nil {
 			return nil, fmt.Errorf("error converting from json to yaml : %v", err)
 		}
@@ -271,6 +277,17 @@ func NeatYAMLOrJSON(in []byte, outputFormat string) (out []byte, err error) {
 		}
 		buf.Write(y)
 	}
+	return buf.Bytes(), nil
+}
+
+// indentJSON formats JSON output the way kubectl -o json does. Neat edits documents in place,
+// which leaves a mix of indented and compact sections.
+func indentJSON(s string) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := json.Indent(&buf, bytes.TrimSpace([]byte(s)), "", "    "); err != nil {
+		return nil, fmt.Errorf("error formatting json : %v", err)
+	}
+	buf.WriteByte('\n')
 	return buf.Bytes(), nil
 }
 

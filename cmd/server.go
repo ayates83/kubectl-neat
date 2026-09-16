@@ -20,6 +20,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/ayates83/kubectl-neat/pkg/jsonpath"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -70,7 +71,8 @@ var serverAnnotations = []string{
 	"openshift.io/sa.scc.uid-range", // allocated per cluster, wrong anywhere else
 	"openshift.io/sa.scc.supplemental-groups",
 	"openshift.io/sa.scc.mcs",
-	"openshift.io/requester", // the user who requested the project
+	"openshift.io/requester",                   // the user who requested the project
+	"openshift.io/image.dockerRepositoryCheck", // ImageStream import timestamp
 
 	"config.kubernetes.io/origin",    // kustomize build
 	"argocd.argoproj.io/tracking-id", // Argo CD
@@ -153,8 +155,7 @@ func deleteMatching(in, path string, patterns []string, protected ...string) (st
 
 // escapeKey makes a map key usable as a single gjson/sjson path component.
 func escapeKey(k string) string {
-	r := strings.NewReplacer(`\`, `\\`, `.`, `\.`, `*`, `\*`, `?`, `\?`, `|`, `\|`, `#`, `\#`, `@`, `\@`)
-	return r.Replace(k)
+	return jsonpath.Escape(k)
 }
 
 // deleteKeys removes each key from the map at path, if present.
@@ -313,8 +314,8 @@ func isSCCAllocatedID(r gjson.Result) bool {
 	return r.Type == gjson.Number && id >= 1000000000 && id%10000 == 0
 }
 
-// neatSCCAllocations removes the user ID, fsGroup and SELinux level that OpenShift's SCC
-// admission injects from the namespace's openshift.io/sa.scc.* allocation. They are valid only
+// neatSCCAllocations removes the legacy seccomp annotation, and the user ID, fsGroup and SELinux
+// level, that OpenShift's SCC admission injects from the namespace's openshift.io/sa.scc.* allocation. They are valid only
 // in the namespace they came from: restricted-v2 rejects them anywhere else. Verified against a
 // live cluster: the neated pod was forbidden for a non-admin user in a second namespace, and
 // accepted with these three removed, when SCC admission re-injected that namespace's values.
@@ -329,6 +330,10 @@ func neatSCCAllocations(in string) (string, error) {
 			in, err = sjson.Delete(in, path)
 		}
 	}
+	// SCC admission also writes the legacy seccomp annotation next to the seccompProfile field
+	// (apiserver-library-go sccmatching). It has done nothing since Kubernetes 1.27, and the API
+	// server warns about it on every create.
+	del("metadata.annotations." + escapeKey("seccomp.security.alpha.kubernetes.io/pod"))
 	if isSCCAllocatedID(gjson.Get(in, "spec.securityContext.fsGroup")) {
 		del("spec.securityContext.fsGroup")
 	}
