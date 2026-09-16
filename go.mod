@@ -2,6 +2,8 @@ module github.com/ayates83/kubectl-neat
 
 go 1.26.0
 
+toolchain go1.26.8
+
 require (
 	github.com/ghodss/yaml v1.0.0
 	github.com/jeremywohl/flatten v0.0.0-20180923035001-588fe0d4c603

@@ -27,6 +27,7 @@ pkg/testutil/                JSONEqual
 test/fixtures/<name>-raw.*   input; <name>-neat.json is the expected output (TestNeat)
 test/*.bats                  end-to-end CLI, kubectl and krew tests; test/kubectl-stub fakes kubectl
 hack/update-kubernetes-deps.sh   the only supported way to bump Kubernetes
+hack/krew-manifest.sh        krew manifest for a release, from krew-template.yaml + checksums.txt
 ```
 
 ## Commands
@@ -87,6 +88,15 @@ does: `GOTOOLCHAIN=auto goreleaser release --snapshot --clean --skip=publish`.
 - **Multi-document YAML is split with apimachinery's `YAMLReader`**, the reader kubectl
   uses. Don't replace it with string splitting on `---`.
 - **gjson/sjson paths need `escapeKey`** for label and annotation keys, which contain `.` and `/`.
+
+## Releases
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`: tests, then GoReleaser builds and
+publishes the archives and `checksums.txt`, then `hack/krew-manifest.sh` attaches `neat.yaml`.
+Tags with a suffix (`v3.0.0-rc.1`) are published as pre-releases. Release notes come from
+`.github/release-notes/<version without suffix>.md` (a GoReleaser template) plus the changelog.
+Versions follow semver: a change to what neat outputs for the same input is a breaking change.
+Never move or delete a published tag; release a new one.
 
 ## Fixtures and data: this is a public repository
 

@@ -1,0 +1,56 @@
+name: Release
+on:
+  push:
+    tags:
+      - "v*"
+permissions:
+  contents: read
+jobs:
+
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release and upload assets
+    steps:
+
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # goreleaser needs the previous tag for the changelog
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: |
+          test -z "$(gofmt -s -d .)"
+          go vet ./...
+          go test ./...
+
+      # .github/release-notes/v3.0.0.md is used for v3.0.0 and its pre-releases (v3.0.0-rc.1, ...).
+      - name: Select release notes
+        id: notes
+        run: |
+          notes=".github/release-notes/${GITHUB_REF_NAME%%-*}.md"
+          if [[ -f "$notes" ]]; then
+            echo "args=--release-header-tmpl $notes" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and publish
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean ${{ steps.notes.outputs.args }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Attach krew manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          hack/krew-manifest.sh "$GITHUB_REF_NAME" dist > dist/neat.yaml
+          gh release upload "$GITHUB_REF_NAME" dist/neat.yaml

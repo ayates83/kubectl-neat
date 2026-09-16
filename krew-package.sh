@@ -4,19 +4,17 @@
 # Arguments:
 #   1. target os (`linux`/`darwin`/`windows`)
 #   2. target arch (`amd64`/`arm64`)
-#   2. plugin name (rename the plugin in tests to avoid conflicts with existing installation)
-#   3. path to goreleaser dist directory
+#   3. plugin name (rename the plugin in tests to avoid conflicts with existing installation)
+#   4. path to goreleaser dist directory
+# The version comes from $VERSION, else the checked-out tag, else v0.0.0.
+set -euo pipefail
 
 os="$1"
 arch="$2"
 plugin="$3"
 dir="$4"
+version="${VERSION:-$(git describe --tags --exact-match 2>/dev/null || echo v0.0.0)}"
 
-sha256=$(grep "${os}_$arch" "$dir/checksums.txt" | cut -f1 -d ' ')
-tmp="$dir/kubectl-${plugin}_${os}_${arch}.json"
-yq -o json krew-template.yaml >"$tmp"
-jq 'delpaths([path(.spec.platforms[] | select( .selector.matchLabels.os != $os or .selector.matchLabels.arch != $arch ))])' --arg os "$os" --arg arch "$arch" "$tmp" | sponge "$tmp"
-jq '.metadata.name = $name' --arg name "$plugin" "$tmp" | sponge "$tmp"
-jq 'setpath(path(.spec.platforms[] | select( .selector.matchLabels.os == $os and .selector.matchLabels.arch == $arch) | .sha256); $sha)' --arg os "$os" --arg arch "$arch" --arg sha "$sha256" "$tmp" | sponge "$tmp"
-yq -o yaml --prettyPrint "$tmp" > "${tmp%.json}.yaml"
-rm "$tmp"
+"$(dirname "$0")/hack/krew-manifest.sh" "$version" "$dir" "$plugin" |
+  OS="$os" ARCH="$arch" yq -P '.spec.platforms |= map(select(.selector.matchLabels.os == strenv(OS) and .selector.matchLabels.arch == strenv(ARCH)))' \
+    >"$dir/kubectl-${plugin}_${os}_${arch}.yaml"

@@ -18,8 +18,11 @@ checksum:
   name_template: 'checksums.txt'
 snapshot:
   version_template: "{{ .Tag }}-next"
+release:
+  prerelease: auto # tags like v3.0.0-rc.1 are published as pre-releases
 changelog:
   filters:
     exclude:
     - '^docs:'
     - '^test:'
+    - '^Merge pull request'
