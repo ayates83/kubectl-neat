@@ -17,6 +17,7 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -243,7 +244,11 @@ spec:
 	if err != nil {
 		t.Fatalf("multi-document yaml to json: %v", err)
 	}
-	if !strings.Contains(string(out), `"kind":"List"`) || strings.Count(string(out), `"apiVersion":"v1"`) != 3 {
+	var list struct {
+		Kind  string            `json:"kind"`
+		Items []json.RawMessage `json:"items"`
+	}
+	if err := json.Unmarshal(out, &list); err != nil || list.Kind != "List" || len(list.Items) != 2 {
 		t.Errorf("want a v1 List holding both documents, have:\n%s", out)
 	}
 
@@ -304,5 +309,15 @@ func TestGetIgnoresKubectlWarnings(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "Warning: v1 ComponentStatus is deprecated") {
 		t.Errorf("kubectl's warning should be passed through on stderr, have: %q", stderr.String())
+	}
+}
+
+func TestYAMLStreamStartingWithFlowMapping(t *testing.T) {
+	out, err := NeatYAMLOrJSON([]byte("{}\n---\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: a}\n"), "same")
+	if err != nil {
+		t.Fatalf("a YAML stream whose first document is {} is not JSON: %v", err)
+	}
+	if !strings.Contains(string(out), "kind: ConfigMap") {
+		t.Errorf("want the ConfigMap document in YAML, have:\n%s", out)
 	}
 }

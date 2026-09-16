@@ -187,6 +187,20 @@ kubelet, CNI | static-pod `kubernetes.io/config.*`; Multus, OVN-Kubernetes and C
 OpenShift | `openshift.io/scc` and the validated subject type; per-cluster `sa.scc` UID, group and MCS ranges; on Pods admitted through an SCC, the `runAsUser`, `fsGroup` and SELinux level it injected from that namespace's allocation (restricted-v2 rejects them in any other namespace); `openshift.io/requester`; the generated `<sa>-dockercfg-*` pull secret on Pods; on Routes, a generated `spec.host` and the Route API defaults
 GitOps | Argo CD `tracking-id`, Flux `kustomize.toolkit.fluxcd.io/*` and `helm.toolkit.fluxcd.io/*` labels, kustomize `config.kubernetes.io/origin`
 
+### Empty values that mean something are kept
+
+kubectl-neat removes empty objects and lists, but in two shapes Kubernetes gives emptiness a
+meaning, and removing them would change what the manifest does. These are always kept:
+
+- **An empty list element.** A NetworkPolicy rule `{}` allows all traffic; with the rule gone, the
+  policy denies it. `ports: [{protocol: TCP}]` keeps its default rather than becoming `[{}]`.
+- **An empty label selector** (any key ending in `selector`/`Selector`). `selector: {}` on a
+  PodDisruptionBudget covers every pod, and a missing one covers none; `namespaceSelector: {}` in a
+  NetworkPolicy peer or an affinity term means all namespaces.
+
+Upstream kubectl-neat removed both, so its output could turn an allow-all NetworkPolicy into a
+deny-all one.
+
 ### Known limitations
 
 - **Allocated `nodePort`s are kept.** Without `managedFields` (which `kubectl get` omits) a port the
@@ -194,6 +208,9 @@ GitOps | Argo CD `tracking-id`, Flux `kustomize.toolkit.fluxcd.io/*` and `helm.t
   clients. Re-creating a NodePort Service in the same cluster fails until you remove it.
 - **Values you set to their default are removed too.** The result is equivalent on apply, but
   the output no longer shows that you chose it.
+- **Custom resources get generic cleanup only.** Their defaults are not known, and empty values are
+  removed except in the two shapes above. A CRD that gives some other empty field a meaning is not
+  protected.
 
 ## What's new in this fork
 
@@ -208,8 +225,19 @@ GitOps | Argo CD `tracking-id`, Flux `kustomize.toolkit.fluxcd.io/*` and `helm.t
 - **`--strip-annotation` / `--strip-label`** for site-specific metadata.
 - **Diff mode** for `kubectl diff`.
 - **Windows builds** (#114).
-- **Fixes**: `neat get` failed whenever kubectl printed a warning, and mis-detected `-o json`;
-  invalid input shorter than 20 characters panicked.
+- **Fixes**:
+  - output could invert a manifest's meaning: an allow-all NetworkPolicy became deny-all, and a
+    PodDisruptionBudget covering every pod covered none (see above)
+  - empty-string values were taken for defaults: an empty argument vanished from `args`, and
+    `env` values of `""` were dropped
+  - a key containing path syntax (`#`, `*`, `?`, `|`) could empty the whole output
+  - `neat get` failed whenever kubectl printed a warning, and mis-detected `-o json`
+  - invalid input shorter than 20 characters panicked
+  - JSON output mixed compact and indented sections
+  - YAML key order could change between runs of the same input (for example ConfigMap keys like
+    `00-base.conf` and `010-extra.conf`), a go-yaml bug that `kubectl -o yaml` shares; output is
+    now deterministic and otherwise unchanged
+- **Faster on large lists**: a cluster's ConfigMaps (11 MB) in under 2 seconds instead of 30.
 - Kubernetes 1.36 libraries; Go 1.26.
 
 ## Credits
