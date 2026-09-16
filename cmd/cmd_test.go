@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"io/ioutil"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -255,5 +256,53 @@ func TestNeatShortInvalidJSON(t *testing.T) {
 	// used to panic slicing in[:20]
 	if _, err := Neat("{bad"); err == nil {
 		t.Errorf("want an error for invalid json")
+	}
+}
+
+func TestKubectlOutputFormat(t *testing.T) {
+	cases := map[string][]string{
+		"":     {"pod", "json"}, // a resource named json
+		"json": {"pod", "p", "-o", "json"},
+		"yaml": {"pod", "p", "-oyaml"},
+		"wide": {"pod", "--output=wide"},
+	}
+	cases["json "] = []string{"pod", "-o=json"}
+	cases["yaml "] = []string{"-ojson", "pod", "--output", "yaml"} // last one wins
+	for want, args := range cases {
+		if have := kubectlOutputFormat(args); have != strings.TrimSpace(want) {
+			t.Errorf("kubectlOutputFormat(%q) = %q, want %q", args, have, strings.TrimSpace(want))
+		}
+	}
+}
+
+func TestGetIgnoresKubectlWarnings(t *testing.T) {
+	stub, err := filepath.Abs("../test/kubectl-stub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	noisy := filepath.Join(t.TempDir(), "kubectl")
+	script := "#!/usr/bin/env bash\necho 'Warning: v1 ComponentStatus is deprecated' >&2\nexec " + stub + " \"$@\"\n"
+	if err := os.WriteFile(noisy, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	defer func(k string) { kubectl = k }(kubectl)
+	kubectl = noisy
+
+	var stdout, stderr bytes.Buffer
+	rootCmd.SetOut(&stdout)
+	rootCmd.SetErr(&stderr)
+	defer func() { rootCmd.SetOut(os.Stdout); rootCmd.SetErr(os.Stderr); rootCmd.SetArgs(nil) }()
+	output := rootCmd.PersistentFlags().Lookup("output") // flag state outlives earlier Execute calls
+	output.Value.Set("yaml")
+	output.Changed = false
+	rootCmd.SetArgs([]string{"get", "--", "pods", "mypod"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("a warning on kubectl's stderr must not break parsing: %v", err)
+	}
+	if !strings.HasPrefix(stdout.String(), "apiVersion") {
+		t.Errorf("want neated yaml on stdout, have:\n%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "Warning: v1 ComponentStatus is deprecated") {
+		t.Errorf("kubectl's warning should be passed through on stderr, have: %q", stderr.String())
 	}
 }

@@ -140,34 +140,25 @@ kubectl neat get -- svc -n default myservice --output json`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var out []byte
 		var err error
-		//reset defaults
-		//there are two output settings in this subcommand: kubectl get's and kubectl-neat's
-		//any combination of those can be provided by using the output flag in either side of the --
-		//the most efficient is kubectl: json, kubectl-neat: yaml
-		//0--0->Y--J #choose what's best for us
-		//0--Y->Y--Y #user did specify output in kubectl, so respect that
-		//0--J->J--J #user did specify output in kubectl, so respect that
-		//Y--0->Y--J #user doesn't care about kubectl so use json but convert back
-		//J--0->J--J #user expects json so use it for foth
-		//if the user specified both side we can't touch it
-
-		//the desired kubectl get output is always json, unless it was explicitly set by the user to yaml in which case the arg is overriden when concatenating the args later
+		// kubectl is always asked for JSON, the cheapest input; a -o the user passes after
+		// "--" comes later on the command line and wins. The output format is, in order:
+		// kubectl-neat's own -o, else the format the user asked kubectl for, else YAML.
 		cmdArgs := append([]string{"get", "-o", "json"}, args...)
 		kubectlCmd := exec.Command(kubectl, cmdArgs...)
-		kres, err := kubectlCmd.CombinedOutput()
+		var stderr bytes.Buffer
+		kubectlCmd.Stderr = &stderr
+		kres, err := kubectlCmd.Output() // not CombinedOutput: warnings on stderr would corrupt the JSON
 		if err != nil {
-			return fmt.Errorf("Error invoking kubectl as %v %v", kubectlCmd.Args, err)
+			return fmt.Errorf("Error invoking kubectl as %v %v: %s", kubectlCmd.Args, err, bytes.TrimSpace(stderr.Bytes()))
 		}
-		//handle the case of 0--J->J--J
-		outFormat := *outputFormat
-		kubeout := "yaml"
-		for _, arg := range args {
-			if arg == "json" || arg == "ojson" {
-				outFormat = "json"
-			}
-		}
-		if !cmd.Flag("output").Changed && kubeout == "json" {
+		cmd.PrintErr(stderr.String())
+
+		outFormat := "yaml"
+		if f := kubectlOutputFormat(args); f == "json" {
 			outFormat = "json"
+		}
+		if cmd.Flag("output").Changed {
+			outFormat = *outputFormat
 		}
 		out, err = NeatYAMLOrJSON(kres, outFormat)
 		if err != nil {
@@ -176,6 +167,31 @@ kubectl neat get -- svc -n default myservice --output json`,
 		cmd.Println(string(out))
 		return nil
 	},
+}
+
+// kubectlOutputFormat returns the value of the last -o/--output flag in kubectl arguments,
+// in any of its spellings, or "" if there is none. A bare "json" is a resource name.
+func kubectlOutputFormat(args []string) string {
+	format := ""
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			return format
+		case a == "-o" || a == "--output":
+			if i+1 < len(args) {
+				i++
+				format = args[i]
+			}
+		case strings.HasPrefix(a, "--output="):
+			format = strings.TrimPrefix(a, "--output=")
+		case strings.HasPrefix(a, "-o="):
+			format = strings.TrimPrefix(a, "-o=")
+		case strings.HasPrefix(a, "-o") && !strings.HasPrefix(a, "--"):
+			format = strings.TrimPrefix(a, "-o")
+		}
+	}
+	return format
 }
 
 // populated by goreleaser
