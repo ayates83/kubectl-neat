@@ -1,0 +1,28 @@
+{
+    "apiVersion": "apps/v1",
+    "kind": "Deployment",
+    "metadata": {"annotations":{"deployment.kubernetes.io/revision":"1"},"labels":{"app":"web"},"name":"web","namespace":"demo"},
+    "spec": {
+        "selector": {
+            "matchLabels": {
+                "app": "web"
+            }
+        },
+        "template": {
+            "metadata": {
+                "creationTimestamp": null,
+                "labels": {
+                    "app": "web"
+                }
+            },
+            "spec": {
+                "containers": [
+                    {
+                        "image": "nginx:1.27",
+                        "name": "nginx"
+                    }
+                ]
+            }
+        }
+    }
+}

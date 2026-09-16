@@ -11,7 +11,21 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
-	apisv1 "k8s.io/kubernetes/pkg/apis/core/v1"
+	admissionregistrationv1 "k8s.io/kubernetes/pkg/apis/admissionregistration/v1"
+	appsv1 "k8s.io/kubernetes/pkg/apis/apps/v1"
+	autoscalingv1 "k8s.io/kubernetes/pkg/apis/autoscaling/v1"
+	autoscalingv2 "k8s.io/kubernetes/pkg/apis/autoscaling/v2"
+	batchv1 "k8s.io/kubernetes/pkg/apis/batch/v1"
+	certificatesv1 "k8s.io/kubernetes/pkg/apis/certificates/v1"
+	corev1 "k8s.io/kubernetes/pkg/apis/core/v1"
+	discoveryv1 "k8s.io/kubernetes/pkg/apis/discovery/v1"
+	flowcontrolv1 "k8s.io/kubernetes/pkg/apis/flowcontrol/v1"
+	networkingv1 "k8s.io/kubernetes/pkg/apis/networking/v1"
+	policyv1 "k8s.io/kubernetes/pkg/apis/policy/v1"
+	rbacv1 "k8s.io/kubernetes/pkg/apis/rbac/v1"
+	resourcev1 "k8s.io/kubernetes/pkg/apis/resource/v1"
+	schedulingv1 "k8s.io/kubernetes/pkg/apis/scheduling/v1"
+	storagev1 "k8s.io/kubernetes/pkg/apis/storage/v1"
 )
 
 // NeatDefaults gets a json document representing a Kubernetes resource, and removes all fields with default values.
@@ -74,9 +88,34 @@ func flatMapJSON(j string, prefix string) (map[string]interface{}, error) {
 var myscheme *runtime.Scheme
 var decoder runtime.Decoder
 
+// schemeAdders registers the types and the server-side defaulting functions of every
+// built-in API group that has them. Kinds outside this list are left untouched by
+// NeatDefaults, because there is nothing authoritative to compare against.
+var schemeAdders = []func(*runtime.Scheme) error{
+	corev1.AddToScheme,
+	appsv1.AddToScheme,
+	batchv1.AddToScheme,
+	autoscalingv1.AddToScheme,
+	autoscalingv2.AddToScheme,
+	networkingv1.AddToScheme,
+	policyv1.AddToScheme,
+	rbacv1.AddToScheme,
+	storagev1.AddToScheme,
+	schedulingv1.AddToScheme,
+	discoveryv1.AddToScheme,
+	certificatesv1.AddToScheme,
+	flowcontrolv1.AddToScheme,
+	admissionregistrationv1.AddToScheme,
+	resourcev1.AddToScheme,
+}
+
 func init() {
 	myscheme = runtime.NewScheme()
-	apisv1.AddToScheme(myscheme)
+	for _, add := range schemeAdders {
+		if err := add(myscheme); err != nil {
+			panic(fmt.Sprintf("registering defaulting scheme: %v", err))
+		}
+	}
 	decoder = scheme.Codecs.UniversalDeserializer()
 }
 

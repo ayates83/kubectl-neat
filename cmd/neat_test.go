@@ -353,7 +353,7 @@ func TestNeat(t *testing.T) {
 				continue
 			}
 			if !equal {
-				t.Errorf("test case failed: %s:\nhave %s\nwant %s", fName, string(expBytes), resJSON)
+				t.Errorf("test case failed: %s:\nhave %s\nwant %s", fName, resJSON, string(expBytes))
 			}
 		}
 	}
