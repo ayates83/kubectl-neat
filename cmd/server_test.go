@@ -137,3 +137,23 @@ func TestNeatServerPopulated(t *testing.T) {
 		}
 	}
 }
+
+func TestUserStripLists(t *testing.T) {
+	defer func() { userAnnotations, userLabels = nil, nil }()
+	userAnnotations = []string{"example.com/*", "ticket"}
+	userLabels = []string{"app", "team"}
+
+	data := `{"apiVersion":"apps/v1","kind":"Deployment",
+		"metadata":{"name":"d","annotations":{"example.com/owner":"x","example.com/":"y","ticket":"1","tickets":"2"},"labels":{"app":"d","team":"t"}},
+		"spec":{"selector":{"matchLabels":{"app":"d"}},"template":{"metadata":{"labels":{"app":"d","team":"t"}}}}}`
+	want := `{"apiVersion":"apps/v1","kind":"Deployment",
+		"metadata":{"name":"d","annotations":{"tickets":"2"},"labels":{}},
+		"spec":{"selector":{"matchLabels":{"app":"d"}},"template":{"metadata":{"labels":{"app":"d"}}}}}`
+	have, err := neatServerPopulated(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if equal, _ := testutil.JSONEqual(have, want); !equal {
+		t.Errorf("a selector label must survive on the template, prefix and exact matches must not overreach.\nwant: %s\nhave: %s", want, have)
+	}
+}

@@ -17,6 +17,7 @@ package cmd
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/tidwall/gjson"
@@ -101,6 +102,55 @@ var jobGeneratedLabels = []string{
 	"batch.kubernetes.io/job-name",
 }
 
+// userAnnotations and userLabels are extra keys to strip, from --strip-annotation and
+// --strip-label or their environment variables. A trailing '*' matches any suffix.
+var userAnnotations, userLabels []string
+
+// selectorKeys returns the label keys a controller's selector requires on the template at
+// metadataPath. Removing one of those would make the neated object invalid.
+func selectorKeys(in, metadataPath string) []string {
+	prefix, ok := strings.CutSuffix(metadataPath, "template.metadata")
+	if !ok {
+		return nil
+	}
+	var keys []string
+	for _, sel := range []string{prefix + "selector.matchLabels", prefix + "selector"} {
+		gjson.Get(in, sel).ForEach(func(k, v gjson.Result) bool {
+			if v.Type == gjson.String {
+				keys = append(keys, k.Str)
+			}
+			return true
+		})
+	}
+	return keys
+}
+
+// deleteMatching removes every key in the map at path that matches one of patterns,
+// except the protected ones.
+func deleteMatching(in, path string, patterns []string, protected ...string) (string, error) {
+	if len(patterns) == 0 {
+		return in, nil
+	}
+	m := gjson.Get(in, path)
+	if !m.IsObject() {
+		return in, nil
+	}
+	var matched []string
+	m.ForEach(func(k, _ gjson.Result) bool {
+		if slices.Contains(protected, k.Str) {
+			return true
+		}
+		for _, p := range patterns {
+			if prefix, ok := strings.CutSuffix(p, "*"); ok && strings.HasPrefix(k.Str, prefix) || k.Str == p {
+				matched = append(matched, k.Str)
+				break
+			}
+		}
+		return true
+	})
+	return deleteKeys(in, path, matched)
+}
+
 // escapeKey makes a map key usable as a single gjson/sjson path component.
 func escapeKey(k string) string {
 	r := strings.NewReplacer(`\`, `\\`, `.`, `\.`, `*`, `\*`, `?`, `\?`, `|`, `\|`, `#`, `\#`, `@`, `\@`)
@@ -171,6 +221,12 @@ func neatServerPopulated(in string) (string, error) {
 			return in, err
 		}
 		if in, err = deleteKeys(in, p+".labels", serverLabels); err != nil {
+			return in, err
+		}
+		if in, err = deleteMatching(in, p+".annotations", userAnnotations); err != nil {
+			return in, err
+		}
+		if in, err = deleteMatching(in, p+".labels", userLabels, selectorKeys(in, p)...); err != nil {
 			return in, err
 		}
 		// A nil metav1.Time serialises as "creationTimestamp": null in every template (#64).

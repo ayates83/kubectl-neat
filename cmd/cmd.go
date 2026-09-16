@@ -22,6 +22,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"unicode"
 
 	"github.com/ghodss/yaml"
@@ -36,11 +37,35 @@ var inputFile *string
 func init() {
 	outputFormat = rootCmd.PersistentFlags().StringP("output", "o", "yaml", "output format: yaml or json")
 	inputFile = rootCmd.Flags().StringP("file", "f", "-", "file path to neat, or - to read from stdin")
+	rootCmd.PersistentFlags().StringSliceVar(&userAnnotations, "strip-annotation", nil,
+		"annotation key to remove, repeatable or comma-separated; a trailing * matches a prefix (env "+stripAnnotationsEnv+")")
+	rootCmd.PersistentFlags().StringSliceVar(&userLabels, "strip-label", nil,
+		"label key to remove, repeatable or comma-separated; a trailing * matches a prefix (env "+stripLabelsEnv+")")
+	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
+		userAnnotations = append(userAnnotations, splitEnv(stripAnnotationsEnv)...)
+		userLabels = append(userLabels, splitEnv(stripLabelsEnv)...)
+	}
 	rootCmd.SetOut(os.Stdout)
 	rootCmd.SetErr(os.Stderr)
 	rootCmd.MarkFlagFilename("file")
 	rootCmd.AddCommand(getCmd)
 	rootCmd.AddCommand(versionCmd)
+}
+
+const (
+	stripAnnotationsEnv = "KUBECTL_NEAT_STRIP_ANNOTATIONS"
+	stripLabelsEnv      = "KUBECTL_NEAT_STRIP_LABELS"
+)
+
+// splitEnv reads a comma-separated list from the environment, ignoring blanks.
+func splitEnv(name string) []string {
+	var out []string
+	for _, v := range strings.Split(os.Getenv(name), ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // Execute is the entry point for the command package
@@ -57,7 +82,8 @@ var rootCmd = &cobra.Command{
 kubectl get pod mypod -oyaml | kubectl neat -o json
 kubectl neat -f - <./my-pod.json
 kubectl neat -f ./my-pod.json
-kubectl neat -f ./my-pod.json --output yaml`,
+kubectl neat -f ./my-pod.json --output yaml
+kubectl get deploy -o yaml | kubectl neat --strip-annotation 'example.com/*' --strip-label team`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var in, out []byte
 		var err error
