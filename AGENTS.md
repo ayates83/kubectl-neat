@@ -23,6 +23,8 @@ cmd/server.go                fields written by the cluster, not the author (admi
                              controllers, OpenShift, CNI, GitOps) + --strip-* matching
 cmd/diff.go                  `diff` subcommand and the --diff flag for KUBECTL_EXTERNAL_DIFF
 pkg/defaults/defaults.go     removes values equal to the API server's defaulting output
+pkg/jsonpath/                escaped gjson/sjson path building; use it for every path from a key
+cmd/fuzz_test.go             FuzzNeatYAMLOrJSON; cmd/testdata/fuzz holds regression seeds
 pkg/testutil/                JSONEqual
 test/fixtures/<name>-raw.*   input; <name>-neat.json is the expected output (TestNeat)
 test/*.bats                  end-to-end CLI, kubectl and krew tests; test/kubectl-stub fakes kubectl
@@ -64,10 +66,27 @@ does: `GOTOOLCHAIN=auto goreleaser release --snapshot --clean --skip=publish`.
    survive. Put it in the table in `cmd/server_test.go`. Then break the rule on purpose and
    confirm the negative test fails. A new test that passes first time proves nothing until
    you have seen it fail.
-5. **Default removal is generic.** `pkg/defaults` compares against the defaulting functions
+5. **Never remove emptiness that has meaning.** `neatEmpty` keeps empty list elements and
+   empty `*selector`/`*Selector` objects (`emptyIsMeaningful` in `cmd/neat.go`): a NetworkPolicy
+   rule `{}` allows all traffic, and a PodDisruptionBudget `selector: {}` covers every pod.
+   Any new removal must not produce either shape by removing its contents.
+6. **Default removal is generic.** `pkg/defaults` compares against the defaulting functions
    registered in `schemeAdders`. To cover a new built-in API group, register its
    `k8s.io/kubernetes/pkg/apis/<group>/<version>` package there. Do not hand-write default
    values that the scheme already knows.
+
+## Testing beyond unit tests
+
+- `go test ./cmd -run '^$' -fuzz FuzzNeatYAMLOrJSON -fuzztime 5m` hunts for panics, emptied
+  output and non-idempotent output. Failing inputs land in `cmd/testdata/fuzz/`; keep the real
+  ones as regression seeds.
+- Unit tests cannot show that output still applies. Before a release, run neat against a live
+  cluster:
+  1. neat each object
+  2. create the result as a **non-admin** user in a second namespace (admins get more permissive
+     OpenShift SCCs, which hides namespace-specific values)
+  3. neat that copy and require it to match
+- Check `go test -race ./...`: default checks run concurrently.
 
 ## Gotchas
 
@@ -87,7 +106,10 @@ does: `GOTOOLCHAIN=auto goreleaser release --snapshot --clean --skip=publish`.
   merged into the JSON.
 - **Multi-document YAML is split with apimachinery's `YAMLReader`**, the reader kubectl
   uses. Don't replace it with string splitting on `---`.
-- **gjson/sjson paths need `escapeKey`** for label and annotation keys, which contain `.` and `/`.
+- **Build gjson/sjson paths with `pkg/jsonpath`** (`escapeKey` in `cmd`). Keys routinely contain
+  `.` and can contain `#`, `*`, `?`, `|`; a raw path addresses the wrong field or is rejected.
+- **`sjson.Delete` and `sjson.Set` return `""` on error.** Never write `in, err = sjson.Delete(...)`
+  and then `continue`: that replaces the document with nothing. Assign only on success.
 
 ## Releases
 
